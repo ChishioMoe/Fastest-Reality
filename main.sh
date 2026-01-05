@@ -15,13 +15,12 @@ fi
 # 检查旧文件是否存在
 if [ -f "/root/reality.json" ] && [ -f "/root/sing-box" ]; then
     echo "检测到已安装 sing-box。"
-    echo "1. 重新安装  2. 更改配置  3. 当前配置  4. 切换版本  5. 卸载"
+    echo "1. 重新安装 (含核心)  2. 更改配置 (跳过核心)  3. 当前配置  4. 切换版本  5. 卸载"
     read -p "请输入选择 (1-5): " choice
     case $choice in
         1) systemctl stop sing-box; rm /root/reality.json /root/sing-box ;;
-        2) # 简化逻辑：重装以更改配置
-           systemctl stop sing-box ;;
-        3) # 显示当前配置链接并退出
+        2) systemctl stop sing-box; skip_kernel="true" ;;
+        3) 
            uuid=$(jq -r '.inbounds[0].users[0].uuid' /root/reality.json)
            sip=$(curl -s https://api.ipify.org)
            port=$(jq -r '.inbounds[0].listen_port' /root/reality.json)
@@ -43,7 +42,7 @@ get_best_sni() {
     local min_lat=9999
     local best_d=""
     
-    echo -e "\n正在测试 17 个候选域名的延迟与抖动 (ping 10次)..."
+    echo -e "\n正在测试候选域名的延迟与抖动 (ping 10次)..."
     echo "------------------------------------------------------"
     printf "%-25s | %-12s | %-10s\n" "域名" "平均延迟" "抖动"
     
@@ -63,44 +62,44 @@ get_best_sni() {
         fi
     done
     echo "------------------------------------------------------"
-    # 输出给变量调用，最后一行是结果
     echo "RESULT $best_d $min_lat"
 }
 
-# --- 安装流程 ---
+# --- 安装/更新流程 ---
 
-# 1. 选择版本
-echo ""
-read -p "选择安装版本 (1.稳定版 2.测试版, 默认 1): " v_choice
-v_choice=${v_choice:-1}
-is_pre="false"; [ "$v_choice" -eq 2 ] && is_pre="true"
+if [ "$skip_kernel" != "true" ]; then
+    # 1. 选择版本并下载
+    echo ""
+    read -p "选择安装版本 (1.稳定版 2.测试版, 默认 1): " v_choice
+    v_choice=${v_choice:-1}
+    is_pre="false"; [ "$v_choice" -eq 2 ] && is_pre="true"
 
-# 获取下载地址
-latest_version_tag=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r "[.[] | select(.prerelease==$is_pre)][0].tag_name")
-latest_version=${latest_version_tag#v}
-arch=$(uname -m)
-case ${arch} in x86_64) arch="amd64" ;; aarch64) arch="arm64" ;; armv7l) arch="armv7" ;; esac
-package_name="sing-box-${latest_version}-linux-${arch}"
-url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz"
+    latest_version_tag=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r "[.[] | select(.prerelease==$is_pre)][0].tag_name")
+    latest_version=${latest_version_tag#v}
+    arch=$(uname -m)
+    case ${arch} in x86_64) arch="amd64" ;; aarch64) arch="arm64" ;; armv7l) arch="armv7" ;; esac
+    package_name="sing-box-${latest_version}-linux-${arch}"
+    url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz"
 
-# 2. 下载核心并显示进度条
-echo -e "\n\033[36m正在下载 sing-box $latest_version_tag...\033[0m"
-curl -# -L -o "/root/${package_name}.tar.gz" "$url"
+    echo -e "\n\033[36m正在下载 sing-box $latest_version_tag...\033[0m"
+    curl -# -L -o "/root/${package_name}.tar.gz" "$url"
 
-# 3. 解压并清理
-echo "正在安装核心文件..."
-tar -xzf "/root/${package_name}.tar.gz" -C /root && mv "/root/${package_name}/sing-box" /root/
-rm -r "/root/${package_name}.tar.gz" "/root/${package_name}"
-chmod +x /root/sing-box
+    echo "正在安装核心文件..."
+    tar -xzf "/root/${package_name}.tar.gz" -C /root && mv "/root/${package_name}/sing-box" /root/
+    rm -r "/root/${package_name}.tar.gz" "/root/${package_name}"
+    chmod +x /root/sing-box
+else
+    echo -e "\n\033[33m已跳过内核安装，正在直接进入配置流程...\033[0m"
+fi
 
-# 4. 执行测速并获取 IP
+# 2. 执行测速并获取 IP
 sni_data=$(get_best_sni)
 best_domain=$(echo "$sni_data" | grep "RESULT" | awk '{print $2}')
 best_latency=$(echo "$sni_data" | grep "RESULT" | awk '{print $3}')
 
 auto_ip=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
 
-# 5. 交互确认
+# 3. 交互确认
 echo -e "\n自动获取的公网 IP: \033[32m$auto_ip\033[0m"
 read -p "确认 IP (直接回车确认，或输入新 IP): " user_ip
 server_ip=${user_ip:-$auto_ip}
@@ -112,7 +111,7 @@ echo -e "\n最优域名推荐: \033[32m$best_domain\033[0m (平均延迟: \033[3
 read -p "确认 SNI (默认使用 $best_domain): " server_name
 server_name=${server_name:-$best_domain}
 
-# 6. 生成 REALITY 配置
+# 4. 生成 REALITY 配置
 uuid=$(/root/sing-box generate uuid)
 short_id=$(/root/sing-box generate rand --hex 8)
 key_pair=$(/root/sing-box generate reality-keypair)
@@ -146,7 +145,8 @@ jq -n --arg lp "$listen_port" --arg sn "$server_name" --arg pk "$private_key" --
   "outbounds": [{"type": "direct","tag": "direct"}]
 }' > /root/reality.json
 
-# 7. 写入服务并启动
+# 5. 写入服务并启动
+if [ ! -f "/etc/systemd/system/sing-box.service" ]; then
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 After=network.target nss-lookup.target
@@ -158,13 +158,14 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 systemctl daemon-reload && systemctl enable sing-box && systemctl restart sing-box
 
-# 8. 完成展示
+# 6. 完成展示
 server_link="vless://$uuid@$server_ip:$listen_port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$server_name&fp=chrome&pbk=$public_key&sid=$short_id&type=tcp&headerType=none#Singbox-TCP"
 
-echo -e "\n\033[32m✔ 安装并启动成功!\033[0m"
+echo -e "\n\033[32m✔ 配置并启动成功!\033[0m"
 echo -e "已选 SNI: $server_name (${best_latency}ms)"
 echo -e "\n节点链接:"
 echo -e "\033[33m$server_link\033[0m\n"
