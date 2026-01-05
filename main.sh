@@ -38,7 +38,7 @@ fi
 
 # --- 核心功能：域名测速函数 ---
 get_best_sni() {
-    local domains=("www.salesforce.com" "www.costco.com" "www.bing.com" "learn.microsoft.com" "swdist.apple.com" "www.tesla.com" "www.softbank.jp" "www.homedepot.com" "scholar.google.com" "itunes.apple.com" "www.amazon.com" "dl.google.com" "cdn.discordapp.com" "addons.mozilla.org" "www.yahoo.co.jp" "www.lovelive-anime.jp" "www.mtr.com.hk")
+    local domains=("www.salesforce.com" "www.costco.com" "www.bing.com" "learn.microsoft.com" "swdist.apple.com" "www.tesla.com" "www.softbank.jp" "www.homedepot.com" "scholar.google.com" "itunes.apple.com" "www.amazon.com" "dl.google.com" "www.bbc.com" "www.reddit.com" "addons.mozilla.org" "www.yahoo.co.jp" "www.lovelive-anime.jp" "www.mtr.com.hk")
     
     local min_lat=9999
     local best_d=""
