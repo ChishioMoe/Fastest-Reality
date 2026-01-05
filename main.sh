@@ -87,11 +87,12 @@ get_best_sni() {
     local domains=("www.salesforce.com" "www.costco.com" "www.bing.com" "learn.microsoft.com" "swdist.apple.com" "www.tesla.com" "www.softbank.jp" "www.homedepot.com" "scholar.google.com" "itunes.apple.com" "www.amazon.com" "dl.google.com" "www.bbc.com" "www.reddit.com" "addons.mozilla.org" "www.yahoo.co.jp" "www.lovelive-anime.jp" "www.mtr.com.hk")
     local min_lat=9999
     local best_d=""
-    echo -e "\n正在测试 18 个候选域名的延迟与抖动 (ping 10次)..."
+    echo -e "\n正在测试 18 个候选域名的延迟与抖动 (每域名 ping 3 次，超时 1 秒)..."
     echo "------------------------------------------------------"
     printf "%-25s | %-12s | %-10s\n" "域名" "平均延迟" "抖动"
     for d in "${domains[@]}"; do
-        local res=$(ping -c 10 -q "$d" 2>/dev/null | tail -1)
+        # 使用较少的 ping 次数并设置单次超时，避免在网络不稳定时长时间阻塞
+        local res=$(ping -c 3 -W 1 -q "$d" 2>/dev/null | tail -1)
         if [ -n "$res" ]; then
             local avg=$(echo "$res" | cut -d '/' -f 5)
             local jitter=$(echo "$res" | cut -d '/' -f 7 | cut -d ' ' -f 1)
@@ -109,10 +110,19 @@ get_best_sni() {
 }
 
 # --- 执行测速与交互配置 ---
-sni_data=$(get_best_sni)
-best_domain=$(echo "$sni_data" | grep "RESULT" | awk '{print $2}')
-best_latency=$(echo "$sni_data" | grep "RESULT" | awk '{print $3}')
-auto_ip=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
+read -p "是否执行 SNI 延迟测试？(Y/n，测试可能需要几秒钟): " run_sni_test
+run_sni_test=${run_sni_test:-Y}
+if [[ "$run_sni_test" =~ ^[Nn]$ ]]; then
+    best_domain="addons.mozilla.org"
+    best_latency="N/A"
+else
+    sni_data=$(get_best_sni)
+    best_domain=$(echo "$sni_data" | grep "RESULT" | awk '{print $2}')
+    best_latency=$(echo "$sni_data" | grep "RESULT" | awk '{print $3}')
+fi
+
+# 使用带超时的 curl，避免 DNS 或网络问题导致脚本长时间阻塞
+auto_ip=$(curl -s --connect-timeout 5 --max-time 10 https://api.ipify.org || curl -s --connect-timeout 5 --max-time 10 https://ifconfig.me || echo "0.0.0.0")
 
 echo -e "\n自动获取的公网 IP: \033[32m$auto_ip\033[0m"
 read -p "确认 IP (直接回车确认，或输入新 IP): " user_ip
