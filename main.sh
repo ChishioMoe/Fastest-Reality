@@ -12,29 +12,17 @@ if ! command -v jq &> /dev/null || ! command -v bc &> /dev/null; then
     fi
 fi
 
-# 初始化变量
-skip_kernel="false"
-
 # 检查旧文件是否存在并提供管理菜单
 if [ -f "/root/reality.json" ] && [ -f "/root/sing-box" ]; then
     echo "---------- sing-box 管理菜单 ----------"
-    echo "1. 重新安装 (下载最新核心并重置配置)"
-    echo "2. 仅修改配置 (跳过内核安装，仅更新 SNI/端口/IP)"
-    echo "3. 查看当前配置链接"
-    echo "4. 切换版本 (稳定版 <-> 测试版)"
-    echo "5. 卸载"
+    echo "1. 重新安装/修改配置 (进入版本选择)"
+    echo "2. 查看当前配置链接"
+    echo "3. 卸载"
     echo "--------------------------------------"
-    read -p "请输入选择 (1-5): " main_choice
+    read -p "请输入选择 (1-3): " main_choice
     case $main_choice in
-        1) 
-           systemctl stop sing-box
-           rm /root/reality.json /root/sing-box 
-           ;;
+        1) systemctl stop sing-box ;;
         2) 
-           systemctl stop sing-box
-           skip_kernel="true" 
-           ;;
-        3) 
            uuid=$(jq -r '.inbounds[0].users[0].uuid' /root/reality.json)
            sip=$(curl -s https://api.ipify.org)
            port=$(jq -r '.inbounds[0].listen_port' /root/reality.json)
@@ -42,31 +30,64 @@ if [ -f "/root/reality.json" ] && [ -f "/root/sing-box" ]; then
            pbk=$(base64 --decode /root/public.key.b64)
            sid=$(jq -r '.inbounds[0].tls.reality.short_id[0]' /root/reality.json)
            echo -e "\n当前链接:\nvless://$uuid@$sip:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$sni&fp=chrome&pbk=$pbk&sid=$sid&type=tcp&headerType=none#Singbox-TCP\n"
-           exit 0 
-           ;;
-        4) 
-           # 切换版本逻辑：删除旧核心，不设置 skip_kernel
-           systemctl stop sing-box
-           rm /root/sing-box
-           echo "已删除旧核心，请重新选择所需版本进行安装。"
-           ;;
-        5) 
+           exit 0 ;;
+        3) 
            systemctl stop sing-box; systemctl disable sing-box > /dev/null 2>&1
            rm /etc/systemd/system/sing-box.service /root/reality.json /root/sing-box /root/public.key.b64
-           echo "卸载完成!"; exit 0 
-           ;;
-        *) 
-           echo "无效选择"; exit 1 
-           ;;
+           echo "卸载完成!"; exit 0 ;;
     esac
 fi
 
-# --- 核心功能：域名测速函数 ---
+# --- 核心下载与跳过逻辑 ---
+echo -e "\n请选择核心安装方式:"
+echo "1. 安装/更新 稳定版 (Stable)"
+echo "2. 安装/更新 测试版 (Pre-release)"
+echo "3. 跳过内核安装 (直接使用现有核心进行配置)"
+read -p "请输入选择 (默认 1): " v_choice
+v_choice=${v_choice:-1}
+
+is_skip="false"
+if [ "$v_choice" -eq 3 ]; then
+    if [ ! -f "/root/sing-box" ]; then
+        echo -e "\033[31m错误: 找不到本地核心文件 /root/sing-box，必须下载！\033[0m"
+        is_skip="false"
+        is_pre="false"
+    else
+        is_skip="true"
+    fi
+elif [ "$v_choice" -eq 2 ]; then
+    is_pre="true"
+else
+    is_pre="false"
+fi
+
+if [ "$is_skip" == "false" ]; then
+    # 获取下载地址
+    latest_version_tag=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r "[.[] | select(.prerelease==$is_pre)][0].tag_name")
+    latest_version=${latest_version_tag#v}
+    arch=$(uname -m)
+    case ${arch} in x86_64) arch="amd64" ;; aarch64) arch="arm64" ;; armv7l) arch="armv7" ;; esac
+    package_name="sing-box-${latest_version}-linux-${arch}"
+    url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz"
+
+    echo -e "\n\033[36m正在下载 sing-box $latest_version_tag ($arch)...\033[0m"
+    # 使用 -# 显示百分比进度条
+    curl -# -L -o "/root/${package_name}.tar.gz" "$url"
+
+    echo "正在安装核心文件..."
+    tar -xzf "/root/${package_name}.tar.gz" -C /root && mv "/root/${package_name}/sing-box" /root/
+    rm -r "/root/${package_name}.tar.gz" "/root/${package_name}"
+    chmod +x /root/sing-box
+else
+    echo -e "\n\033[33m[跳过内核安装] 保持当前核心版本，仅重新生成配置...\033[0m"
+fi
+
+# --- 域名测速函数 ---
 get_best_sni() {
     local domains=("www.salesforce.com" "www.costco.com" "www.bing.com" "learn.microsoft.com" "swdist.apple.com" "www.tesla.com" "www.softbank.jp" "www.homedepot.com" "scholar.google.com" "itunes.apple.com" "www.amazon.com" "dl.google.com" "www.bbc.com" "www.reddit.com" "addons.mozilla.org" "www.yahoo.co.jp" "www.lovelive-anime.jp" "www.mtr.com.hk")
     local min_lat=9999
     local best_d=""
-    echo -e "\n正在测试 17 个候选域名的延迟与抖动 (ping 10次)..."
+    echo -e "\n正在测试 18 个候选域名的延迟与抖动 (ping 10次)..."
     echo "------------------------------------------------------"
     printf "%-25s | %-12s | %-10s\n" "域名" "平均延迟" "抖动"
     for d in "${domains[@]}"; do
@@ -87,34 +108,7 @@ get_best_sni() {
     echo "RESULT $best_d $min_lat"
 }
 
-# --- 核心下载逻辑 ---
-if [ "$skip_kernel" == "false" ]; then
-    echo -e "\n请选择要下载的核心版本:"
-    echo "1. 稳定版 (Stable)"
-    echo "2. 测试版 (Pre-release)"
-    read -p "请输入选择 (默认 1): " v_choice
-    v_choice=${v_choice:-1}
-    is_pre="false"; [ "$v_choice" -eq 2 ] && is_pre="true"
-
-    latest_version_tag=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r "[.[] | select(.prerelease==$is_pre)][0].tag_name")
-    latest_version=${latest_version_tag#v}
-    arch=$(uname -m)
-    case ${arch} in x86_64) arch="amd64" ;; aarch64) arch="arm64" ;; armv7l) arch="armv7" ;; esac
-    package_name="sing-box-${latest_version}-linux-${arch}"
-    url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz"
-
-    echo -e "\n\033[36m正在下载 sing-box $latest_version_tag ($arch)...\033[0m"
-    curl -# -L -o "/root/${package_name}.tar.gz" "$url"
-
-    echo "正在安装核心文件..."
-    tar -xzf "/root/${package_name}.tar.gz" -C /root && mv "/root/${package_name}/sing-box" /root/
-    rm -r "/root/${package_name}.tar.gz" "/root/${package_name}"
-    chmod +x /root/sing-box
-else
-    echo -e "\n\033[33m[跳过内核安装] 保持当前内核不变，仅更新配置...\033[0m"
-fi
-
-# --- 测速与交互配置 ---
+# --- 执行测速与交互配置 ---
 sni_data=$(get_best_sni)
 best_domain=$(echo "$sni_data" | grep "RESULT" | awk '{print $2}')
 best_latency=$(echo "$sni_data" | grep "RESULT" | awk '{print $3}')
@@ -185,7 +179,7 @@ systemctl daemon-reload && systemctl enable sing-box && systemctl restart sing-b
 # 完成展示
 server_link="vless://$uuid@$server_ip:$listen_port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$server_name&fp=chrome&pbk=$public_key&sid=$short_id&type=tcp&headerType=none#Singbox-TCP"
 
-echo -e "\n\033[32m✔ 处理完成!\033[0m"
-echo -e "已选 SNI: $server_name (${best_latency}ms)"
+echo -e "\n\033[32m✔ 安装/配置成功!\033[0m"
+echo -e "已选 SNI: $server_name (\033[33m${best_latency}ms\033[0m)"
 echo -e "\n节点链接:"
 echo -e "\033[33m$server_link\033[0m\n"
