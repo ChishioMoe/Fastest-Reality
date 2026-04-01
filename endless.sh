@@ -2,19 +2,19 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.9.4 (SNI 优选版 / 稳定修复版)
-# 更新日志 (v2.9.4):
+# 版本: Final v3.0.0 (SNI 优选版 / Clash YAML 输出版)
+# 更新日志 (v3.0.0):
 # - [修复] Reality 密钥解析兼容新版/旧版 xray x25519 输出
 # - [修复] 解决偶发“生成 Reality 密钥对失败”问题
 # - [优化] 补全 openssl/wget/ping/ss 等依赖检查与自动安装
-# - [优化] spinner 与后台任务等待逻辑，避免静默模式下误判
+# - [新增] 最终配置信息统一导出为 Clash 标准 YAML（英文 key）
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.9.4"
+readonly SCRIPT_VERSION="Final v3.0.0"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -33,7 +33,7 @@ error() {
 
     case "$1" in
         *"网络"*|*"下载"*)
-            echo -e "$yellow提示: 检查网络连接或更换 DNS$none" >&2 ;;
+            echo -e "$yellow提示: 检查网络连接或更换DNS$none" >&2 ;;
         *"权限"*|*"root"*)
             echo -e "$yellow提示: 请使用 sudo 运行脚本$none" >&2 ;;
         *"端口"*)
@@ -88,7 +88,7 @@ get_public_ip() {
 
 # --- 预检查与环境设置 ---
 pre_check() {
-    [[ "$(id -u)" != 0 ]] && error "错误: 您必须以 root 用户身份运行此脚本" && exit 1
+    [[ "$(id -u)" != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
     if [[ ! -f /etc/debian_version ]]; then
         error "错误: 此脚本仅支持 Debian/Ubuntu 及其衍生系统。"
         exit 1
@@ -133,6 +133,7 @@ check_xray_status() {
         xray_status_info=" Xray 状态: ${red}未安装${none}"
         return
     fi
+
     local xray_version
     xray_version=$("$xray_binary_path" version 2>/dev/null | head -n 1 | awk '{print $2}' || echo "未知")
     local service_status
@@ -180,13 +181,11 @@ get_best_sni() {
     local best_jitter=0
 
     for domain in "${domains[@]}"; do
-        local res
+        local res avg jitter
         res=$(ping -c 4 -W 1 -q "$domain" 2>/dev/null | tail -1 || true)
         if [[ -n "$res" ]]; then
-            local avg jitter
             avg=$(echo "$res" | cut -d '/' -f 5)
             jitter=$(echo "$res" | cut -d '/' -f 7 | cut -d ' ' -f 1)
-
             [[ -z "$avg" ]] && continue
 
             printf "%-25s | %-8s ms | %-8s ms\n" "$domain" "$avg" "$jitter" >&2
@@ -200,9 +199,9 @@ get_best_sni() {
             printf "%-25s | %-10s\n" "$domain" "超时/不可达" >&2
         fi
     done
+
     echo "------------------------------------------------------" >&2
     echo -e "${green}推荐最佳 SNI: $best_domain${none} (延迟: ${min_latency}ms, 抖动: ${best_jitter}ms)" >&2
-
     echo "$best_domain"
 }
 
@@ -211,7 +210,16 @@ generate_ss_key() {
     openssl rand -base64 16
 }
 
-# 修复点：兼容 xray x25519 各版本输出格式
+yaml_escape() {
+    local s="${1:-}"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '%s' "$s"
+}
+
+# 兼容 xray x25519 输出：
+# - Private key: xxx / Public key: xxx
+# - PrivateKey: xxx / Password: xxx (兼容历史异常写法)
 generate_reality_keypair() {
     local -n out_private="$1" out_public="$2"
     local raw_output candidates
@@ -221,12 +229,16 @@ generate_reality_keypair() {
         return 1
     }
 
-    out_private=$(echo "$raw_output" | awk -F': *' 'BEGIN{IGNORECASE=1}
-        $1 ~ /private[[:space:]]*key/ {gsub(/\r/,"",$2); print $2; exit}')
-    out_public=$(echo "$raw_output" | awk -F': *' 'BEGIN{IGNORECASE=1}
-        $1 ~ /(public[[:space:]]*key|password)/ {gsub(/\r/,"",$2); print $2; exit}')
+    out_private=$(echo "$raw_output" | awk -F': *' '{
+        k=tolower($1);
+        if (k ~ /private[[:space:]]*key/) {gsub(/\r/,"",$2); print $2; exit}
+    }')
+    out_public=$(echo "$raw_output" | awk -F': *' '{
+        k=tolower($1);
+        if (k ~ /public[[:space:]]*key/ || k ~ /password/) {gsub(/\r/,"",$2); print $2; exit}
+    }')
 
-    # 兜底：若无标签，提取前两个疑似 key 字符串
+    # 兜底：无标签时提取前两个疑似 key 字符串
     if [[ -z "$out_private" || -z "$out_public" ]]; then
         candidates=$(echo "$raw_output" | grep -Eo '[A-Za-z0-9+/=_-]{40,}' || true)
         [[ -z "$out_private" ]] && out_private=$(echo "$candidates" | sed -n '1p')
@@ -237,8 +249,6 @@ generate_reality_keypair() {
         error "无法解析 Reality 密钥对，xray 输出异常: $raw_output"
         return 1
     fi
-
-    return 0
 }
 
 build_vless_inbound() {
@@ -280,7 +290,9 @@ build_vless_inbound() {
 
 build_ss_inbound() {
     local port="$1" password="$2"
-    jq -n --argjson port "$port" --arg password "$password" \
+    jq -n \
+        --argjson port "$port" \
+        --arg password "$password" \
         '{
           "listen": "0.0.0.0",
           "port": $port,
@@ -318,6 +330,95 @@ write_config() {
     chown root:root "$xray_config_path"
 }
 
+write_clash_config() {
+    local output_file="$1" ip="$2" host="$3" vless_inbound="$4" ss_inbound="$5"
+    local -a proxy_names=()
+
+    cat > "$output_file" <<'EOF'
+mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+ipv6: true
+
+proxies:
+EOF
+
+    if [[ -n "$vless_inbound" ]]; then
+        local uuid port domain public_key shortid vless_name
+        uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
+        port=$(echo "$vless_inbound" | jq -r '.port')
+        domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+        public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
+        shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
+        vless_name="${host}-vless-reality"
+
+        if [[ -n "$public_key" && "$public_key" != "null" ]]; then
+            proxy_names+=("$vless_name")
+            cat >> "$output_file" <<EOF
+  - name: "$(yaml_escape "$vless_name")"
+    type: vless
+    server: "$(yaml_escape "$ip")"
+    port: $port
+    uuid: "$(yaml_escape "$uuid")"
+    network: tcp
+    udp: true
+    tls: true
+    servername: "$(yaml_escape "$domain")"
+    flow: xtls-rprx-vision
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: "$(yaml_escape "$public_key")"
+      short-id: "$(yaml_escape "$shortid")"
+EOF
+        fi
+    fi
+
+    if [[ -n "$ss_inbound" ]]; then
+        local ss_port ss_method ss_password ss_name
+        ss_port=$(echo "$ss_inbound" | jq -r '.port')
+        ss_method=$(echo "$ss_inbound" | jq -r '.settings.method')
+        ss_password=$(echo "$ss_inbound" | jq -r '.settings.password')
+        ss_name="${host}-ss2022"
+
+        proxy_names+=("$ss_name")
+        cat >> "$output_file" <<EOF
+  - name: "$(yaml_escape "$ss_name")"
+    type: ss
+    server: "$(yaml_escape "$ip")"
+    port: $ss_port
+    cipher: "$(yaml_escape "$ss_method")"
+    password: "$(yaml_escape "$ss_password")"
+    udp: true
+EOF
+    fi
+
+    if [[ ${#proxy_names[@]} -eq 0 ]]; then
+        rm -f "$output_file"
+        return 1
+    fi
+
+    {
+        cat <<'EOF'
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+EOF
+        for name in "${proxy_names[@]}"; do
+            printf '      - "%s"\n' "$(yaml_escape "$name")"
+        done
+        cat <<'EOF'
+      - "DIRECT"
+
+rules:
+  - MATCH,PROXY
+EOF
+    } >> "$output_file"
+
+    chmod 600 "$output_file"
+}
+
 execute_official_script() {
     local args="$1"
     local script_content
@@ -336,6 +437,7 @@ execute_official_script() {
     (echo "$script_content" | bash -s -- "${arg_array[@]}") &>/dev/null &
     local task_pid=$!
     spinner "$task_pid"
+
     if ! wait "$task_pid"; then
         return 1
     fi
@@ -396,14 +498,15 @@ prompt_for_vless_config() {
     done
     info "VLESS 端口将使用: ${cyan}${p_port}${none}"
 
-    read -p "$(echo -e " -> 请输入 UUID (留空将自动生成): ")" p_uuid || true
+    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" p_uuid || true
     if [[ -z "$p_uuid" ]]; then
         p_uuid=$(cat /proc/sys/kernel/random/uuid)
-        info "已为您生成随机 UUID: ${cyan}${p_uuid}${none}"
+        info "已为您生成随机UUID: ${cyan}${p_uuid}${none}"
     fi
 
     local default_sni="learn.microsoft.com"
     local use_auto_sni=""
+
     echo ""
     read -p "$(echo -e " -> 是否自动测试并优选最佳 SNI 域名? [Y/n] (默认: ${cyan}Y${none}): ")" use_auto_sni || true
     [[ -z "$use_auto_sni" ]] && use_auto_sni="y"
@@ -413,7 +516,7 @@ prompt_for_vless_config() {
     fi
 
     while true; do
-        read -p "$(echo -e " -> 请输入 SNI 域名 (默认: ${cyan}${default_sni}${none}): ")" p_sni || true
+        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}${default_sni}${none}): ")" p_sni || true
         [[ -z "$p_sni" ]] && p_sni="$default_sni"
         if is_valid_domain "$p_sni"; then
             break
@@ -544,6 +647,7 @@ add_ss_to_vless() {
         error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
         return 1
     fi
+
     local vless_inbound vless_port default_ss_port ss_port ss_password ss_inbound
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     vless_port=$(echo "$vless_inbound" | jq -r '.port')
@@ -568,7 +672,9 @@ add_vless_to_ss() {
         error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
         return 1
     fi
-    local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain private_key public_key vless_inbound
+
+    local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain
+    local private_key public_key vless_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     ss_port=$(echo "$ss_inbound" | jq -r '.port')
     default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "443" || echo "$((ss_port - 1))")
@@ -619,7 +725,6 @@ install_dual() {
     fi
 
     prompt_for_ss_config ss_port ss_password "$default_ss_port"
-
     run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
 }
 
@@ -628,6 +733,7 @@ update_xray() {
         error "错误: Xray 未安装。"
         return
     fi
+
     info "正在检查最新版本..."
     local current_version latest_version
     current_version=$("$xray_binary_path" version | head -n 1 | awk '{print $2}')
@@ -637,6 +743,7 @@ update_xray() {
         error "获取最新版本号失败，请检查网络或稍后重试。"
         return
     fi
+
     info "当前版本: ${cyan}${current_version}${none}，最新版本: ${cyan}${latest_version}${none}"
 
     if [[ "$current_version" == "$latest_version" ]]; then
@@ -657,17 +764,20 @@ uninstall_xray() {
         error "错误: Xray 未安装。"
         return
     fi
+
     read -p "$(echo -e "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}")" confirm || true
     if [[ "$confirm" =~ ^[nN]$ ]]; then
         info "操作已取消。"
         return
     fi
+
     info "正在卸载 Xray..."
     if ! execute_official_script "remove --purge"; then
         error "Xray 卸载失败！"
         return 1
     fi
-    rm -f ~/xray_subscription_info.txt
+
+    rm -f ~/xray_subscription_info.txt ~/clash_config.yaml
     success "Xray 已成功卸载。"
 }
 
@@ -711,6 +821,7 @@ modify_vless_config() {
     info "开始修改 VLESS-Reality 配置..."
     local vless_inbound current_port current_uuid current_domain private_key public_key
     local port uuid domain new_vless_inbound ss_inbound new_inbounds
+
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     current_port=$(echo "$vless_inbound" | jq -r '.port')
     current_uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
@@ -726,7 +837,7 @@ modify_vless_config() {
         fi
     done
 
-    read -p "$(echo -e " -> 新 UUID (当前: ${cyan}${current_uuid}${none}, 留空不改): ")" uuid || true
+    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid}${none}, 留空不改): ")" uuid || true
     [[ -z "$uuid" ]] && uuid="$current_uuid"
 
     local default_sni="$current_domain"
@@ -737,7 +848,7 @@ modify_vless_config() {
     fi
 
     while true; do
-        read -p "$(echo -e " -> 新 SNI 域名 (当前/优选: ${cyan}${default_sni}${none}, 留空不改): ")" domain || true
+        read -p "$(echo -e " -> 新SNI域名 (当前/优选: ${cyan}${default_sni}${none}, 留空不改): ")" domain || true
         [[ -z "$domain" ]] && domain="$default_sni"
         if is_valid_domain "$domain"; then
             break
@@ -748,6 +859,7 @@ modify_vless_config() {
 
     new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
+
     new_inbounds="[$new_vless_inbound]"
     [[ -n "$ss_inbound" ]] && new_inbounds="[$new_vless_inbound, $ss_inbound]"
 
@@ -763,6 +875,7 @@ modify_vless_config() {
 modify_ss_config() {
     info "开始修改 Shadowsocks-2022 配置..."
     local ss_inbound current_port current_password port password new_ss_inbound vless_inbound new_inbounds
+
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     current_port=$(echo "$ss_inbound" | jq -r '.port')
     current_password=$(echo "$ss_inbound" | jq -r '.settings.password')
@@ -780,6 +893,7 @@ modify_ss_config() {
 
     new_ss_inbound=$(build_ss_inbound "$port" "$password")
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
+
     new_inbounds="[$new_ss_inbound]"
     [[ -n "$vless_inbound" ]] && new_inbounds="[$vless_inbound, $new_ss_inbound]"
 
@@ -825,107 +939,53 @@ view_xray_log() {
     journalctl -u xray -f --no-pager
 }
 
+# 统一输出 Clash 标准 YAML
 view_all_info() {
     if [[ ! -f "$xray_config_path" ]]; then
         [[ "$is_quiet" = true ]] && return
-        error "错误: 配置文件不存在。"
+        error "Error: config file not found."
         return
     fi
 
-    [[ "$is_quiet" = false ]] && clear && echo -e "${cyan} Xray 配置及订阅信息${none}" && draw_divider
-
-    local ip
+    local ip host clash_output_file vless_inbound ss_inbound
     ip=$(get_public_ip || true)
     if [[ -z "$ip" ]]; then
-        [[ "$is_quiet" = false ]] && error "无法获取公网 IP 地址。"
+        [[ "$is_quiet" = false ]] && error "Error: unable to get public IP."
         return 1
     fi
-    local host
+
     host=$(hostname)
-    local links_array=()
-
-    local vless_inbound
+    clash_output_file="${HOME}/clash_config.yaml"
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
-    if [[ -n "$vless_inbound" ]]; then
-        local uuid port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
-        uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
-        port=$(echo "$vless_inbound" | jq -r '.port')
-        domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
-        public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
-        shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
-
-        if [[ -z "$public_key" || "$public_key" == "null" ]]; then
-            [[ "$is_quiet" = false ]] && error "VLESS 配置不完整，可能已损坏。"
-        else
-            display_ip="$ip"
-            [[ "$ip" =~ ":" ]] && display_ip="[$ip]"
-            link_name_raw="$host X-reality"
-            link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-            vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
-            links_array+=("$vless_url")
-
-            if [[ "$is_quiet" = false ]]; then
-                echo -e "${green} [ VLESS-Reality 配置 ]${none}"
-                printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
-                printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-                printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
-                printf "    %s: ${cyan}%s${none}\n" "UUID" "$uuid"
-                printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
-                printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
-                printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
-                printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
-                printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "$public_key"
-                printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
-            fi
-        fi
-    fi
-
-    local ss_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
-    if [[ -n "$ss_inbound" ]]; then
-        local port method password link_name_raw user_info_base64 ss_url
-        port=$(echo "$ss_inbound" | jq -r '.port')
-        method=$(echo "$ss_inbound" | jq -r '.settings.method')
-        password=$(echo "$ss_inbound" | jq -r '.settings.password')
-        link_name_raw="$host X-ss2022"
-        user_info_base64=$(echo -n "${method}:${password}" | base64 -w 0)
-        ss_url="ss://${user_info_base64}@${ip}:${port}#${link_name_raw}"
-        links_array+=("$ss_url")
 
-        if [[ "$is_quiet" = false ]]; then
-            echo ""
-            echo -e "${green} [ Shadowsocks-2022 配置 ]${none}"
-            printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
-            printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-            printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
-            printf "    %s: ${cyan}%s${none}\n" "加密方式" "$method"
-            printf "    %s: ${cyan}%s${none}\n" "密码" "$password"
-        fi
+    if ! write_clash_config "$clash_output_file" "$ip" "$host" "$vless_inbound" "$ss_inbound"; then
+        [[ "$is_quiet" = false ]] && info "No available inbound found."
+        return 0
     fi
 
-    if [[ ${#links_array[@]} -gt 0 ]]; then
-        if [[ "$is_quiet" = true ]]; then
-            printf "%s\n" "${links_array[@]}"
-        else
-            draw_divider
-            printf "%s\n" "${links_array[@]}" > ~/xray_subscription_info.txt
-            success "所有订阅链接已汇总保存到: ~/xray_subscription_info.txt"
-
-            echo -e "\n${yellow} --- V2Ray / Clash 等客户端可直接导入以下链接 --- ${none}\n"
-            for link in "${links_array[@]}"; do
-                echo -e "${cyan}${link}${none}\n"
-            done
-            draw_divider
-        fi
-    elif [[ "$is_quiet" = false ]]; then
-        info "当前未安装任何协议，无订阅信息可显示。"
+    if [[ "$is_quiet" = true ]]; then
+        cat "$clash_output_file"
+        return 0
     fi
+
+    clear
+    echo -e "${cyan} Clash Configuration (YAML)${none}"
+    draw_divider
+    printf " Host: %s\n" "$host"
+    printf " Server IP: %s\n" "$ip"
+    printf " Output File: %s\n" "$clash_output_file"
+    draw_divider
+    success "Clash YAML generated successfully."
+    echo ""
+    cat "$clash_output_file"
+    draw_divider
 }
 
 # --- 核心安装逻辑函数 ---
 run_install_vless() {
     local port="$1" uuid="$2" domain="$3"
+
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         exit 1
@@ -953,11 +1013,14 @@ run_install_vless() {
 
 run_install_ss() {
     local port="$1" password="$2"
+
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         exit 1
     fi
+
     run_core_install || exit 1
+
     local ss_inbound
     ss_inbound=$(build_ss_inbound "$port" "$password")
     write_config "[$ss_inbound]"
@@ -972,6 +1035,7 @@ run_install_ss() {
 
 run_install_dual() {
     local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5"
+
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         exit 1
@@ -1009,7 +1073,7 @@ main_menu() {
         printf "  ${yellow}%-2s${none} %-35s\n" "4." "修改配置"
         printf "  ${cyan}%-2s${none} %-35s\n" "5." "重启 Xray"
         printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
-        printf "  ${green}%-2s${none} %-35s\n" "7." "查看订阅信息"
+        printf "  ${green}%-2s${none} %-35s\n" "7." "导出 Clash 配置"
         draw_divider
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出脚本"
         draw_divider
@@ -1018,7 +1082,6 @@ main_menu() {
         read -p " 请输入选项 [0-7]: " choice || true
 
         local needs_pause=true
-
         case "$choice" in
             1) install_menu ;;
             2) update_xray ;;
@@ -1028,7 +1091,7 @@ main_menu() {
             6) view_xray_log; needs_pause=false ;;
             7) view_all_info ;;
             0) success "感谢使用！"; exit 0 ;;
-            *) error "无效选项。请输入 0 到 7 之间的数字。" ;;
+            *) error "无效选项。请输入0到7之间的数字。" ;;
         esac
 
         if [[ "$needs_pause" = true ]]; then
@@ -1046,7 +1109,7 @@ non_interactive_usage() {
 
   通用选项:
     --type <type>      安装类型 (必须: vless, ss, dual)
-    --quiet            静默模式, 成功后只输出订阅链接
+    --quiet            静默模式, 成功后仅输出 Clash YAML 到 stdout
 
   VLESS 选项:
     --vless-port <p>   VLESS 端口 (默认: 443)
@@ -1061,8 +1124,8 @@ non_interactive_usage() {
     # 安装 VLESS (使用默认值)
     ./$(basename "$0") install --type vless
 
-    # 安静地安装双协议并指定 VLESS 端口和 UUID，并将链接保存到文件
-    ./$(basename "$0") install --type dual --vless-port 2053 --uuid 'your-uuid-here' --quiet > links.txt
+    # 安静地安装双协议并将 Clash YAML 保存到文件
+    ./$(basename "$0") install --type dual --vless-port 2053 --uuid 'your-uuid-here' --quiet > clash_config.yaml
 EOF
 }
 
@@ -1111,7 +1174,7 @@ non_interactive_dispatcher() {
             [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="learn.microsoft.com"
             if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni"; then
-                error "VLESS 参数无效。请检查端口或 SNI 域名。"
+                error "VLESS 参数无效。请检查端口或SNI域名。"
                 non_interactive_usage
                 exit 1
             fi
@@ -1142,7 +1205,7 @@ non_interactive_dispatcher() {
                 fi
             fi
             if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port"; then
-                error "双协议参数无效。请检查端口或 SNI 域名。"
+                error "双协议参数无效。请检查端口或SNI域名。"
                 non_interactive_usage
                 exit 1
             fi
