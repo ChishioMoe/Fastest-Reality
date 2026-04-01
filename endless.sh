@@ -2,12 +2,13 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v3.0.0 (SNI 优选版 / Clash YAML 输出版)
+# 版本: Final v3.0.0 (SNI 优选版 / Clash YAML 输出版 + QR码支持)
 # 更新日志 (v3.0.0):
 # - [修复] Reality 密钥解析兼容新版/旧版 xray x25519 输出
 # - [修复] 解决偶发“生成 Reality 密钥对失败”问题
 # - [优化] 补全 openssl/wget/ping/ss 等依赖检查与自动安装
 # - [新增] 最终配置信息统一导出为 Clash 标准 YAML（英文 key）
+# - [新增] 自动生成标准 VLESS/SS 分享链接并在终端打印二维码 (qrencode)
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -94,7 +95,8 @@ pre_check() {
         exit 1
     fi
 
-    local dependencies=("jq" "curl" "bc" "openssl" "ping" "ss" "wget")
+    # 新增 qrencode 依赖
+    local dependencies=("jq" "curl" "bc" "openssl" "ping" "ss" "wget" "qrencode")
     local missing=()
 
     for dep in "${dependencies[@]}"; do
@@ -108,13 +110,13 @@ pre_check() {
         (
             DEBIAN_FRONTEND=noninteractive apt-get update &&
             DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                jq curl bc openssl wget ca-certificates iputils-ping iproute2
+                jq curl bc openssl wget ca-certificates iputils-ping iproute2 qrencode
         ) &>/dev/null &
         local install_pid=$!
         spinner "$install_pid"
 
         if ! wait "$install_pid"; then
-            error "依赖自动安装失败。请手动运行: apt update && apt install -y jq curl bc openssl wget ca-certificates iputils-ping iproute2"
+            error "依赖自动安装失败。请手动运行: apt update && apt install -y jq curl bc openssl wget ca-certificates iputils-ping iproute2 qrencode"
             exit 1
         fi
 
@@ -217,9 +219,6 @@ yaml_escape() {
     printf '%s' "$s"
 }
 
-# 兼容 xray x25519 输出：
-# - Private key: xxx / Public key: xxx
-# - PrivateKey: xxx / Password: xxx (兼容历史异常写法)
 generate_reality_keypair() {
     local -n out_private="$1" out_public="$2"
     local raw_output candidates
@@ -939,7 +938,7 @@ view_xray_log() {
     journalctl -u xray -f --no-pager
 }
 
-# 统一输出 Clash 标准 YAML
+# 统一输出 Clash 标准 YAML 及其分享链接/二维码
 view_all_info() {
     if [[ ! -f "$xray_config_path" ]]; then
         [[ "$is_quiet" = true ]] && return
@@ -980,6 +979,48 @@ view_all_info() {
     echo ""
     cat "$clash_output_file"
     draw_divider
+
+    # 输出标准分享链接及二维码
+    echo -e "\n${cyan} 分享链接与二维码 (Share Links & QR Code)${none}"
+    draw_divider
+
+    local links_array=()
+
+    if [[ -n "$vless_inbound" ]]; then
+        local uuid port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
+        uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
+        port=$(echo "$vless_inbound" | jq -r '.port')
+        domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+        public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
+        shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
+
+        if [[ -n "$public_key" && "$public_key" != "null" ]]; then
+            display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
+            link_name_raw="$host X-reality"
+            link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
+            vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
+            links_array+=("$vless_url")
+        fi
+    fi
+
+    if [[ -n "$ss_inbound" ]]; then
+        local ss_port ss_method ss_password ss_name user_info_base64 ss_url
+        ss_port=$(echo "$ss_inbound" | jq -r '.port')
+        ss_method=$(echo "$ss_inbound" | jq -r '.settings.method')
+        ss_password=$(echo "$ss_inbound" | jq -r '.settings.password')
+        ss_name="$host X-ss2022"
+        user_info_base64=$(echo -n "${ss_method}:${ss_password}" | base64 -w 0)
+        ss_url="ss://${user_info_base64}@${ip}:${ss_port}#$(echo "$ss_name" | sed 's/ /%20/g')"
+        links_array+=("$ss_url")
+    fi
+
+    for link in "${links_array[@]}"; do
+        echo -e "${green}${link}${none}\n"
+        # 终端打印二维码
+        qrencode -t UTF8 "$link"
+        echo ""
+        draw_divider
+    done
 }
 
 # --- 核心安装逻辑函数 ---
@@ -1073,7 +1114,7 @@ main_menu() {
         printf "  ${yellow}%-2s${none} %-35s\n" "4." "修改配置"
         printf "  ${cyan}%-2s${none} %-35s\n" "5." "重启 Xray"
         printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
-        printf "  ${green}%-2s${none} %-35s\n" "7." "导出 Clash 配置"
+        printf "  ${green}%-2s${none} %-35s\n" "7." "查看配置与二维码"
         draw_divider
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出脚本"
         draw_divider
