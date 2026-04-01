@@ -91,7 +91,7 @@ pre_check() {
     if [ ! -f /etc/debian_version ]; then error "错误: 此脚本仅支持 Debian/Ubuntu 及其衍生系统。" && exit 1; fi
     
     # [修复] 补全了 unzip(Xray解压必须), openssl(SS密钥生成必须), ca-certificates(下载防报错)
-    local dependencies=("jq" "curl" "bc" "unzip" "openssl" "ca-certificates")
+    local dependencies=("jq" "curl" "bc" "unzip" "openssl")
     local need_install=false
     
     for dep in "${dependencies[@]}"; do
