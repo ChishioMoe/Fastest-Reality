@@ -154,7 +154,7 @@ get_best_sni() {
         "www.salesforce.com" "www.costco.com" "www.bing.com" 
         "learn.microsoft.com" "swdist.apple.com" "www.tesla.com" 
         "www.softbank.jp" "www.homedepot.com" "scholar.google.com" 
-        "itunes.apple.com" "www.amazon.com" "dl.google.com" 
+        "itunes.apple.com" "www.amazon.com" "lacma.org" 
         "addons.mozilla.org" "www.yahoo.co.jp" 
         "www.lovelive-anime.jp" "www.mtr.com.hk"
     )
